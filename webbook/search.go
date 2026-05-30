@@ -70,6 +70,7 @@ func searchFromSource(source model.BookSource, key string, page int, jsPool *qjs
 	}
 
 	bookItems := ar.GetElements(bookListRule)
+	//log.Printf("[%s] bookItems=%d", source.BookSourceName, len(bookItems))
 	if len(bookItems) == 0 {
 		log.Printf("[%s] no results matched (body len=%d, bookItems=%d)", source.BookSourceName, len(body), len(bookItems))
 		return nil, nil
@@ -90,6 +91,7 @@ func searchFromSource(source model.BookSource, key string, page int, jsPool *qjs
 			Origin:      source.BookSourceUrl,
 			OriginName:  source.BookSourceName,
 		}
+		//log.Printf("[%s] book=%s", source.BookSourceName, book)
 
 		// Resolve relative book URL
 		if book.BookUrl != "" {
@@ -103,6 +105,7 @@ func searchFromSource(source model.BookSource, key string, page int, jsPool *qjs
 			books = append(books, book)
 		}
 	}
+	log.Printf("[%s] books=%d", source.BookSourceName, len(books))
 	return books, nil
 }
 

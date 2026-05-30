@@ -22,6 +22,10 @@ const (
 // JS_PATTERN matches <js>...</js> or @js:...
 var JS_PATTERN = regexp.MustCompile(`@js:(.+)|<js>([\s\S]*?)</js>`)
 
+// templateExprPattern matches {{expression}} inline templates.
+// Uses non-greedy match to handle nested braces correctly.
+var templateExprPattern = regexp.MustCompile(`\{\{[\w\W]*?\}\}`)
+
 // AnalyzeRule is the main rule dispatcher.
 type AnalyzeRule struct {
 	content string // the HTML/JSON/text to parse
@@ -148,20 +152,149 @@ func (a *AnalyzeRule) getStringFromRules(rules []SourceRule, content string) str
 			result = a.evalJS(r.Rule, result)
 			continue
 		}
+		rule := r.Rule
+		// Resolve {{...}} inline templates before mode dispatch
+		if strings.Contains(rule, "{{") {
+			resolved := a.resolveInlineTemplates(rule, result)
+			// After template resolution, the result is the final string
+			// (templates already contain extraction rules internally)
+			result = resolved
+			continue
+		}
 		switch r.Mode {
 		case ModeJs:
-			result = a.evalJS(r.Rule, result)
+			result = a.evalJS(rule, result)
 		case ModeRegex:
-			result = applyRegex(r.Rule, result, true)
+			result = applyRegex(rule, result, true)
 		case ModeJson:
-			result = jsonPathGetString(r.Rule, result)
+			result = jsonPathGetString(rule, result)
 		case ModeXPath:
-			result = xpathGetString(r.Rule, result)
+			result = xpathGetString(rule, result)
 		default:
-			result = cssGetString(r.Rule, result, a.baseUrl)
+			result = cssGetString(rule, result, a.baseUrl)
 		}
 	}
 	return result
+}
+
+// resolveInlineTemplates resolves {{expression}} templates in a rule string.
+// Each {{expression}} may contain alternatives separated by || (try each until non-empty).
+// Expressions starting with @ are CSS/JSoup rules, $. or $[ are JSONPath, // are XPath, others are JS.
+// After template resolution, ##regex##replacement is applied if present.
+func (a *AnalyzeRule) resolveInlineTemplates(rule string, content string) string {
+	matches := templateExprPattern.FindAllStringIndex(rule, -1)
+	if len(matches) == 0 {
+		return rule
+	}
+
+	var result strings.Builder
+	lastEnd := 0
+	for _, m := range matches {
+		// Append literal text before this template
+		if m[0] > lastEnd {
+			result.WriteString(rule[lastEnd:m[0]])
+		}
+		// Extract expression inside {{...}}
+		expr := rule[m[0]+2 : m[1]-2] // strip {{ and }}
+		val := a.resolveTemplateExpr(expr, content)
+		result.WriteString(val)
+		lastEnd = m[1]
+	}
+	// Append remaining literal text
+	if lastEnd < len(rule) {
+		result.WriteString(rule[lastEnd:])
+	}
+
+	resolved := result.String()
+
+	// Handle ##regex##replacement after the resolved rule
+	if idx := strings.Index(resolved, "##"); idx != -1 {
+		mainRule := strings.TrimSpace(resolved[:idx])
+		regexPart := resolved[idx+2:]
+		replacement := ""
+		if idx2 := strings.Index(regexPart, "##"); idx2 != -1 {
+			replacement = regexPart[idx2+2:]
+			regexPart = regexPart[:idx2]
+		}
+		if regexPart != "" {
+			if re, err := regexp.Compile(regexPart); err == nil {
+				return strings.TrimSpace(re.ReplaceAllString(mainRule, replacement))
+			}
+		}
+		return mainRule
+	}
+
+	return strings.TrimSpace(resolved)
+}
+
+// resolveTemplateExpr evaluates a single expression from inside {{...}}.
+// Handles || alternatives: tries each until one returns non-empty.
+func (a *AnalyzeRule) resolveTemplateExpr(expr string, content string) string {
+	alts := splitTopLevelOr(expr)
+	for _, alt := range alts {
+		alt = strings.TrimSpace(alt)
+		if alt == "" || alt == `""` || alt == `''` {
+			continue
+		}
+		val := a.evalSingleExpr(alt, content)
+		if val != "" {
+			return val
+		}
+	}
+	return ""
+}
+
+// evalSingleExpr evaluates a single expression (no || alternatives).
+func (a *AnalyzeRule) evalSingleExpr(expr string, content string) string {
+	switch {
+	case strings.HasPrefix(expr, "@"):
+		// CSS/JSoup rule
+		return cssGetString(expr[1:], content, a.baseUrl)
+	case strings.HasPrefix(expr, "$.") || strings.HasPrefix(expr, "$["):
+		// JSONPath rule
+		return jsonPathGetString(expr, content)
+	case strings.HasPrefix(expr, "//"):
+		// XPath rule
+		return xpathGetString(expr, content)
+	default:
+		// JavaScript expression
+		return a.evalJS(expr, content)
+	}
+}
+
+// splitTopLevelOr splits a string by || at the top level (not inside quotes or braces).
+func splitTopLevelOr(s string) []string {
+	var parts []string
+	depth := 0
+	inSingle := false
+	inDouble := false
+	inBacktick := false
+	last := 0
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		switch {
+		case ch == '\'' && !inDouble && !inBacktick:
+			inSingle = !inSingle
+		case ch == '"' && !inSingle && !inBacktick:
+			inDouble = !inDouble
+		case ch == '`' && !inSingle && !inDouble:
+			inBacktick = !inBacktick
+		case ch == '\\' && (inSingle || inDouble || inBacktick):
+			i++ // skip escaped char
+		case ch == '{' && !inSingle && !inDouble && !inBacktick:
+			depth++
+		case ch == '}' && !inSingle && !inDouble && !inBacktick:
+			if depth > 0 {
+				depth--
+			}
+		case ch == '|' && i+1 < len(s) && s[i+1] == '|' && !inSingle && !inDouble && !inBacktick && depth == 0:
+			parts = append(parts, s[last:i])
+			last = i + 2
+			i++ // skip second |
+		}
+	}
+	parts = append(parts, s[last:])
+	return parts
 }
 
 // getStringListFromRules processes a chain of SourceRules, returning all matches.

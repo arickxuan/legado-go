@@ -258,8 +258,23 @@ func applyJsoupStep(sel *goquery.Selection, step string) []*goquery.Selection {
 		// text selector - handled in extractContent
 		return []*goquery.Selection{sel}
 	default:
-		// Try as CSS selector directly
+		// In Legado JSoup format, the first part is always a type keyword (tag/class/id/etc).
+		// But many book sources use bare tag names like "a.0" instead of "tag.a.0".
+		// Try as CSS selector first; if no results and pieces[1] is numeric, treat as tag+index.
 		found = sel.Find(step)
+		if (found == nil || found.Length() == 0) && selectorName != "" {
+			if _, err := strconv.Atoi(selectorName); err == nil {
+				// e.g. "a.0" → find all <a> tags, then index=0
+				found = sel.Find(selectorType)
+				if found != nil && found.Length() > 0 {
+					idx, _ := strconv.Atoi(selectorName)
+					if idx >= 0 && idx < found.Length() {
+						return []*goquery.Selection{found.Eq(idx)}
+					}
+					return nil
+				}
+			}
+		}
 	}
 
 	if found == nil || found.Length() == 0 {
