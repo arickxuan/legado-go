@@ -374,10 +374,23 @@ var negativeRegex = regexp.MustCompile(`^-`)
 
 // applyJsoupStep applies one step of JSoup selector.
 // Legado JSoup format: type.name.index (e.g. class.txt-list.0, tag.a.0, id.foo)
+// The ! modifier excludes elements at the given index (e.g. li!0 = all li except first).
 func applyJsoupStep(sel *goquery.Selection, step string) []*goquery.Selection {
 	// Handle negative index for list reversal
 	if strings.HasPrefix(step, "-") && !strings.Contains(step, ".") {
 		step = step[1:]
+	}
+
+	// Handle ! (exclude) modifier: e.g. "li!0" means "all li except index 0"
+	excludeMode := false
+	excludeIdx := -1
+	if bangIdx := strings.Index(step, "!"); bangIdx > 0 {
+		excludeMode = true
+		idxStr := step[bangIdx+1:]
+		step = step[:bangIdx]
+		if idx, err := strconv.Atoi(idxStr); err == nil {
+			excludeIdx = idx
+		}
 	}
 
 	pieces := strings.Split(step, ".")
@@ -407,7 +420,8 @@ func applyJsoupStep(sel *goquery.Selection, step string) []*goquery.Selection {
 			found = sel.Children()
 		}
 	case "class":
-		found = sel.Find("." + selectorName)
+		// Multi-class: "mod block book-all-list" → ".mod.block.book-all-list"
+		found = sel.Find("." + strings.ReplaceAll(selectorName, " ", "."))
 	case "id":
 		found = sel.Find("#" + selectorName)
 	case "children":
@@ -453,9 +467,12 @@ func applyJsoupStep(sel *goquery.Selection, step string) []*goquery.Selection {
 		}
 		return []*goquery.Selection{found.Eq(idx)}
 	}
-	// Return all
+	// Return all (or all-except-excluded)
 	var results []*goquery.Selection
 	found.Each(func(i int, s *goquery.Selection) {
+		if excludeMode && i == excludeIdx {
+			return // skip excluded index
+		}
 		results = append(results, s)
 	})
 	return results

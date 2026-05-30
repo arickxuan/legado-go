@@ -310,18 +310,18 @@
     },
     "ruleSearch": {
       "author": ".s4@text",
-      "bookList": ".txt-list@li!0",
-      "bookUrl": "a@href",
+      "bookList": "class.list-group-item",
+      "bookUrl": "h5 a@href",
       "coverUrl": "{{$.coverUrl}}http://u3v.cn/5zBiW8",
       "kind": ".s1@text##\\[|\\]",
-      "name": "a@text"
+      "name": "h5@text##\\d+\\.|\\[已完结\\]|\\[连载中\\]"
     },
     "ruleToc": {
       "chapterList": ".fix li a",
       "chapterName": "text",
       "chapterUrl": "href"
     },
-    "searchUrl": "https://www.alicesw.com/search.html?keyword={{key}}&page={{page}}",
+    "searchUrl": "https://www.alicesw.com/search.html?q={{key}}&p={{page}}",
     "weight": 0
   },
   {

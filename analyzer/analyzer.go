@@ -182,20 +182,63 @@ func (a *AnalyzeRule) getStringFromRules(rules []SourceRule, content string) str
 			result = a.handleAndConcat(rule, result)
 			continue
 		}
-		switch r.Mode {
+		// Split off ##regex##replacement post-processing before mode dispatch
+		mainRule, replaceRegex, replacement := splitHashReplacement(rule)
+		// Re-detect mode from the cleaned rule (without ##)
+		mode := r.Mode
+		if replaceRegex != "" && mode == ModeRegex {
+			mode = DetectMode(mainRule, a.isJSON)
+		}
+		switch mode {
 		case ModeJs:
-			result = a.evalJS(rule, result)
+			result = a.evalJS(mainRule, result)
 		case ModeRegex:
-			result = applyRegex(rule, result, true)
+			result = applyRegex(mainRule, result, true)
 		case ModeJson:
-			result = jsonPathGetString(rule, result)
+			result = jsonPathGetString(mainRule, result)
 		case ModeXPath:
-			result = xpathGetString(rule, result)
+			result = xpathGetString(mainRule, result)
 		default:
-			result = cssGetString(rule, result, a.baseUrl)
+			result = cssGetString(mainRule, result, a.baseUrl)
+		}
+		// Apply ## post-processing if present
+		if replaceRegex != "" {
+			result = applyRegexPost(result, replaceRegex, replacement)
 		}
 	}
 	return result
+}
+
+// splitHashReplacement splits a rule into the main rule and ##regex##replacement parts.
+// "class.info@ownText##作者：" → ("class.info@ownText", "作者：", "")
+// "rule##regex##replacement" → ("rule", "regex", "replacement")
+func splitHashReplacement(rule string) (string, string, string) {
+	if !strings.Contains(rule, "##") {
+		return rule, "", ""
+	}
+	parts := strings.SplitN(rule, "##", 3)
+	main := strings.TrimSpace(parts[0])
+	regex := ""
+	replacement := ""
+	if len(parts) >= 2 {
+		regex = parts[1]
+	}
+	if len(parts) >= 3 {
+		replacement = parts[2]
+	}
+	return main, regex, replacement
+}
+
+// applyRegexPost applies a regex replacement to a string.
+func applyRegexPost(content string, pattern string, replacement string) string {
+	if content == "" || pattern == "" {
+		return content
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return content
+	}
+	return strings.TrimSpace(re.ReplaceAllString(content, replacement))
 }
 
 // handleAndConcat splits a rule by && and concatenates all non-empty results.
