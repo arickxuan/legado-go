@@ -16,6 +16,8 @@ import (
 	"gopro/analyzer"
 
 	"github.com/fastschema/qjs"
+	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/transform"
 )
 
 var (
@@ -47,6 +49,7 @@ type AnalyzeUrl struct {
 	jsCode        string            // bare @js: code from searchUrl (executed in GetStrResponse)
 	jsPool        *qjs.Pool         // JS pool for inline expression evaluation
 	encodedKey    string            // URL-encoded search keyword (for re-replacement after inline expr)
+	rawKey        string            // raw search keyword (for POST body encoding)
 	page          int               // page number (for re-replacement after inline expr)
 	SourceComment string            // bookSourceComment for eval in inline expressions
 }
@@ -84,6 +87,7 @@ func (a *AnalyzeUrl) initUrl(key string, page int) {
 
 	// Replace {{key}}
 	a.encodedKey = url.QueryEscape(key)
+	a.rawKey = key
 	ruleUrl = keyPattern.ReplaceAllString(ruleUrl, a.encodedKey)
 
 	// Replace {{page}}
@@ -174,6 +178,10 @@ func (a *AnalyzeUrl) parseUrlOption(optionStr string) {
 	}
 	if opt.Body != "" {
 		a.Body = opt.Body
+		// Replace URL-encoded key with raw key in body for proper charset encoding
+		if a.encodedKey != a.rawKey {
+			a.Body = strings.ReplaceAll(a.Body, a.encodedKey, a.rawKey)
+		}
 	}
 	if opt.Charset != "" {
 		a.Charset = opt.Charset
@@ -440,6 +448,18 @@ func (a *AnalyzeUrl) GetStrResponse(jsPool *qjs.Pool) (string, error) {
 		req.Header.Set(k, v)
 	}
 
+	// Encode POST body in the specified charset (e.g. GBK)
+	if a.Method == "POST" && a.Body != "" && a.Charset != "" {
+		charset := strings.ToLower(a.Charset)
+		if charset == "gbk" || charset == "gb2312" || charset == "gb18030" {
+			encoded, err := io.ReadAll(transform.NewReader(strings.NewReader(a.Body), simplifiedchinese.GBK.NewEncoder()))
+			if err == nil {
+				req.Body = io.NopCloser(strings.NewReader(string(encoded)))
+				req.ContentLength = int64(len(encoded))
+			}
+		}
+	}
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
@@ -455,10 +475,15 @@ func (a *AnalyzeUrl) GetStrResponse(jsPool *qjs.Pool) (string, error) {
 		return "", err
 	}
 
-	// Handle charset encoding
-	if a.Charset != "" && strings.ToLower(a.Charset) != "utf-8" {
-		// For gbk and other encodings, we'd need golang.org/x/text
-		// For now, return as-is (most sites use UTF-8)
+	// Decode response body from the specified charset to UTF-8
+	if a.Charset != "" {
+		charset := strings.ToLower(a.Charset)
+		if charset == "gbk" || charset == "gb2312" || charset == "gb18030" {
+			reader := transform.NewReader(strings.NewReader(string(body)), simplifiedchinese.GBK.NewDecoder())
+			if decoded, err := io.ReadAll(reader); err == nil {
+				body = decoded
+			}
+		}
 	}
 
 	return string(body), nil

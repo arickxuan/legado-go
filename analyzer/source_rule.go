@@ -58,6 +58,9 @@ func SplitSourceRule(ruleStr string, isJSON bool, allInOne bool) []SourceRule {
 	if len(matches) == 0 {
 		// No JS, entire rule is one piece
 		r := ruleStr[start:]
+		if mode != ModeRegex {
+			mode = DetectMode(r, isJSON)
+		}
 		if strings.Contains(r, "##") && mode != ModeJs {
 			mode = ModeRegex
 		}

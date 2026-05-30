@@ -98,11 +98,29 @@ func (a *AnalyzeRule) getElementListFromRules(rules []SourceRule, content string
 			if jsResult == "" {
 				return nil
 			}
-			// Check if JS result is a JSON array of strings
+			// Check if JS result is a JSON array
 			if strings.HasPrefix(jsResult, "[") {
 				var arr []string
 				if err := jsonUnmarshal([]byte(jsResult), &arr); err == nil && len(arr) > 0 {
 					return arr
+				}
+				// Array of JSON objects: parse as []interface{} and serialize each as JSON string
+				var arrObj []interface{}
+				if err := jsonUnmarshal([]byte(jsResult), &arrObj); err == nil && len(arrObj) > 0 {
+					var items []string
+					for _, item := range arrObj {
+						if s, ok := item.(string); ok {
+							items = append(items, s)
+						} else {
+							b, err := json.Marshal(item)
+							if err == nil {
+								items = append(items, string(b))
+							}
+						}
+					}
+					if len(items) > 0 {
+						return items
+					}
 				}
 			}
 			current = jsResult
@@ -156,9 +174,12 @@ func (a *AnalyzeRule) getStringFromRules(rules []SourceRule, content string) str
 		// Resolve {{...}} inline templates before mode dispatch
 		if strings.Contains(rule, "{{") {
 			resolved := a.resolveInlineTemplates(rule, result)
-			// After template resolution, the result is the final string
-			// (templates already contain extraction rules internally)
 			result = resolved
+			continue
+		}
+		// Handle && concatenation (e.g. $.tags&&$.category&&$.status)
+		if strings.Contains(rule, "&&") {
+			result = a.handleAndConcat(rule, result)
 			continue
 		}
 		switch r.Mode {
@@ -175,6 +196,40 @@ func (a *AnalyzeRule) getStringFromRules(rules []SourceRule, content string) str
 		}
 	}
 	return result
+}
+
+// handleAndConcat splits a rule by && and concatenates all non-empty results.
+// Each part is evaluated as an individual expression.
+func (a *AnalyzeRule) handleAndConcat(rule string, content string) string {
+	parts := strings.Split(rule, "&&")
+	var results []string
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		val := a.evalSingleRule(part, content)
+		if val != "" {
+			results = append(results, val)
+		}
+	}
+	return strings.Join(results, " ")
+}
+
+// evalSingleRule evaluates a single rule expression (no templates, no &&, no ||).
+func (a *AnalyzeRule) evalSingleRule(rule string, content string) string {
+	switch DetectMode(rule, a.isJSON) {
+	case ModeJs:
+		return a.evalJS(rule, content)
+	case ModeRegex:
+		return applyRegex(rule, content, true)
+	case ModeJson:
+		return jsonPathGetString(rule, content)
+	case ModeXPath:
+		return xpathGetString(rule, content)
+	default:
+		return cssGetString(rule, content, a.baseUrl)
+	}
 }
 
 // resolveInlineTemplates resolves {{expression}} templates in a rule string.
@@ -228,8 +283,16 @@ func (a *AnalyzeRule) resolveInlineTemplates(rule string, content string) string
 }
 
 // resolveTemplateExpr evaluates a single expression from inside {{...}}.
-// Handles || alternatives: tries each until one returns non-empty.
+// If the expression starts with @, it is treated as a CSS/JSoup rule with || cascade.
+// Otherwise, || splits into alternatives tried until one returns non-empty.
 func (a *AnalyzeRule) resolveTemplateExpr(expr string, content string) string {
+	// If the whole expression is a CSS/JSoup rule (starts with @), pass it directly
+	// so that || cascade is handled by the CSS parser.
+	if strings.HasPrefix(expr, "@") {
+		return cssGetString(expr[1:], content, a.baseUrl)
+	}
+
+	// For non-CSS expressions, split by || and try each alternative.
 	alts := splitTopLevelOr(expr)
 	for _, alt := range alts {
 		alt = strings.TrimSpace(alt)
@@ -247,9 +310,6 @@ func (a *AnalyzeRule) resolveTemplateExpr(expr string, content string) string {
 // evalSingleExpr evaluates a single expression (no || alternatives).
 func (a *AnalyzeRule) evalSingleExpr(expr string, content string) string {
 	switch {
-	case strings.HasPrefix(expr, "@"):
-		// CSS/JSoup rule
-		return cssGetString(expr[1:], content, a.baseUrl)
 	case strings.HasPrefix(expr, "$.") || strings.HasPrefix(expr, "$["):
 		// JSONPath rule
 		return jsonPathGetString(expr, content)
@@ -312,11 +372,29 @@ func (a *AnalyzeRule) getStringListFromRules(rules []SourceRule, content string)
 			if jsResult == "" {
 				return nil
 			}
-			// Check if JS result is a JSON array of strings
+			// Check if JS result is a JSON array
 			if strings.HasPrefix(jsResult, "[") {
 				var arr []string
 				if err := jsonUnmarshal([]byte(jsResult), &arr); err == nil && len(arr) > 0 {
 					return arr
+				}
+				// Array of JSON objects: parse as []interface{} and serialize each as JSON string
+				var arrObj []interface{}
+				if err := jsonUnmarshal([]byte(jsResult), &arrObj); err == nil && len(arrObj) > 0 {
+					var items []string
+					for _, item := range arrObj {
+						if s, ok := item.(string); ok {
+							items = append(items, s)
+						} else {
+							b, err := json.Marshal(item)
+							if err == nil {
+								items = append(items, string(b))
+							}
+						}
+					}
+					if len(items) > 0 {
+						return items
+					}
 				}
 			}
 			current = jsResult

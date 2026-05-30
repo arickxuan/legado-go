@@ -10,7 +10,30 @@ import (
 
 // cssGetElementList parses content with CSS/JSoup rules and returns outer HTML of matches.
 // Used by GetElements so that child rules can re-parse each result.
+// Handles || cascade: tries each alternative, returns first non-empty result.
 func cssGetElementList(rule string, content string, baseUrl string) []string {
+	if rule == "" {
+		return []string{content}
+	}
+	if findTopLevelOr(rule) >= 0 {
+		parts := splitByTopLevelOr(rule)
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			result := cssGetElementListSingle(part, content, baseUrl)
+			if len(result) > 0 {
+				return result
+			}
+		}
+		return nil
+	}
+	return cssGetElementListSingle(rule, content, baseUrl)
+}
+
+// cssGetElementListSingle parses a single CSS/JSoup rule without || cascade.
+func cssGetElementListSingle(rule string, content string, baseUrl string) []string {
 	if rule == "" {
 		return []string{content}
 	}
@@ -53,23 +76,122 @@ func cssGetString(rule string, content string, baseUrl string) string {
 }
 
 // cssGetStringList parses content with CSS/JSoup default rules and returns all matches.
+// Handles || cascade: tries each alternative, returns first non-empty result.
 func cssGetStringList(rule string, content string, baseUrl string) []string {
 	if rule == "" {
 		return []string{content}
 	}
 
-	// Check if it's pure CSS selector (starts with @css:)
+	// Handle || cascade (Legado alternatives)
+	if idx := findTopLevelOr(rule); idx >= 0 {
+		parts := splitByTopLevelOr(rule)
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if part == "" || part == `""` || part == `''` {
+				continue
+			}
+			result := cssGetStringListSingle(part, content, baseUrl)
+			if len(result) > 0 {
+				return result
+			}
+		}
+		return nil
+	}
+
+	return cssGetStringListSingle(rule, content, baseUrl)
+}
+
+// cssGetStringListSingle parses a single CSS/JSoup rule without || cascade.
+func cssGetStringListSingle(rule string, content string, baseUrl string) []string {
+	if rule == "" {
+		return []string{content}
+	}
 	if strings.HasPrefix(rule, "@css:") || strings.HasPrefix(rule, "@CSS:") {
 		return cssSelect(rule[5:], content)
 	}
-
-	// Check if it starts with @ - JSoup default syntax
 	if strings.HasPrefix(rule, "@") {
 		return jsoupParse(rule[1:], content)
 	}
-
-	// Default: try as JSoup @ syntax
 	return jsoupParse(rule, content)
+}
+
+// findTopLevelOr returns the index of the first top-level || in the rule, or -1.
+func findTopLevelOr(rule string) int {
+	inQuote := byte(0)
+	depth := 0
+	for i := 0; i < len(rule); i++ {
+		ch := rule[i]
+		if inQuote != 0 {
+			if ch == '\\' {
+				i++
+				continue
+			}
+			if ch == inQuote {
+				inQuote = 0
+			}
+			continue
+		}
+		if ch == '\'' || ch == '"' || ch == '`' {
+			inQuote = ch
+			continue
+		}
+		if ch == '{' || ch == '[' || ch == '(' {
+			depth++
+			continue
+		}
+		if ch == '}' || ch == ']' || ch == ')' {
+			if depth > 0 {
+				depth--
+			}
+			continue
+		}
+		if ch == '|' && i+1 < len(rule) && rule[i+1] == '|' && depth == 0 {
+			return i
+		}
+	}
+	return -1
+}
+
+// splitByTopLevelOr splits a string by top-level || (not inside quotes or braces).
+func splitByTopLevelOr(rule string) []string {
+	var parts []string
+	inQuote := byte(0)
+	depth := 0
+	last := 0
+	for i := 0; i < len(rule); i++ {
+		ch := rule[i]
+		if inQuote != 0 {
+			if ch == '\\' {
+				i++
+				continue
+			}
+			if ch == inQuote {
+				inQuote = 0
+			}
+			continue
+		}
+		if ch == '\'' || ch == '"' || ch == '`' {
+			inQuote = ch
+			continue
+		}
+		if ch == '{' || ch == '[' || ch == '(' {
+			depth++
+			continue
+		}
+		if ch == '}' || ch == ']' || ch == ')' {
+			if depth > 0 {
+				depth--
+			}
+			continue
+		}
+		if ch == '|' && i+1 < len(rule) && rule[i+1] == '|' && depth == 0 {
+			parts = append(parts, rule[last:i])
+			last = i + 2
+			i++
+		}
+	}
+	parts = append(parts, rule[last:])
+	return parts
 }
 
 // cssSelect applies a pure CSS selector.
@@ -132,14 +254,18 @@ func jsoupParseElements(rule string, content string) []string {
 	return extractHTML(selections)
 }
 
-// extractHTML returns the outer HTML of each selection.
+// extractHTML returns the outer HTML of each individual element in the selections.
+// Each *goquery.Selection may contain multiple DOM nodes; we iterate with .Each()
+// to return one outer-HTML string per node.
 func extractHTML(selections []*goquery.Selection) []string {
 	var results []string
 	for _, sel := range selections {
-		html, err := goquery.OuterHtml(sel)
-		if err == nil && html != "" {
-			results = append(results, html)
-		}
+		sel.Each(func(i int, s *goquery.Selection) {
+			html, err := goquery.OuterHtml(s)
+			if err == nil && html != "" {
+				results = append(results, html)
+			}
+		})
 	}
 	return results
 }
@@ -186,6 +312,34 @@ func jsoupParse(rule string, content string) []string {
 	return extractContent(selections, "text")
 }
 
+// htmlTags is a set of common HTML tag names used to distinguish
+// tag selectors (e.g. "a", "img", "div") from attribute extraction (e.g. "title", "onclick").
+var htmlTags = map[string]bool{
+	"a": true, "abbr": true, "address": true, "area": true, "article": true,
+	"aside": true, "audio": true, "b": true, "base": true, "bdi": true,
+	"bdo": true, "blockquote": true, "body": true, "br": true, "button": true,
+	"canvas": true, "caption": true, "cite": true, "code": true, "col": true,
+	"colgroup": true, "data": true, "datalist": true, "dd": true, "del": true,
+	"details": true, "dfn": true, "dialog": true, "div": true, "dl": true,
+	"dt": true, "em": true, "embed": true, "fieldset": true, "figcaption": true,
+	"figure": true, "footer": true, "form": true, "h1": true, "h2": true,
+	"h3": true, "h4": true, "h5": true, "h6": true, "head": true,
+	"header": true, "hr": true, "html": true, "i": true, "iframe": true,
+	"img": true, "input": true, "ins": true, "kbd": true, "label": true,
+	"legend": true, "li": true, "link": true, "main": true, "map": true,
+	"mark": true, "math": true, "menu": true, "meta": true, "meter": true,
+	"nav": true, "noscript": true, "object": true, "ol": true, "optgroup": true,
+	"option": true, "output": true, "p": true, "param": true, "picture": true,
+	"pre": true, "progress": true, "q": true, "rb": true, "rp": true,
+	"rt": true, "rtc": true, "ruby": true, "s": true, "samp": true,
+	"script": true, "section": true, "select": true, "slot": true, "small": true,
+	"source": true, "span": true, "strong": true, "style": true, "sub": true,
+	"summary": true, "sup": true, "svg": true, "table": true, "tbody": true,
+	"td": true, "template": true, "textarea": true, "tfoot": true, "th": true,
+	"thead": true, "time": true, "title": true, "tr": true, "track": true,
+	"u": true, "ul": true, "var": true, "video": true, "wbr": true,
+}
+
 // isExtractionInstruction returns true if the step is a known extraction type
 // (text, href, src, etc.) rather than an element-finding step (tag.li, class.foo, id.x).
 func isExtractionInstruction(step string) bool {
@@ -202,6 +356,10 @@ func isExtractionInstruction(step string) bool {
 	}
 	// Pure numeric index (e.g. "0", "-1") is not an extraction instruction
 	if _, err := strconv.Atoi(first); err == nil {
+		return false
+	}
+	// HTML tag names are selectors, not extraction instructions
+	if htmlTags[first] {
 		return false
 	}
 	// Multi-part step without known type prefix is a CSS selector (e.g. v-list-item)
