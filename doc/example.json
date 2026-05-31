@@ -808,62 +808,6 @@
     "weight": 0
   },
   {
-    "bookSourceComment": "// Error: Unable to resolve host \"833330.xyz\": No address associated with hostname\n\n//修2024.10.14◎GEd520◎",
-    "bookSourceGroup": "刘备",
-    "bookSourceName": "八叉书库🔞",
-    "bookSourceType": 0,
-    "bookSourceUrl": "https://833330.xyz/",
-    "bookUrlPattern": "",
-    "customOrder": 26,
-    "enabled": true,
-    "enabledCookieJar": true,
-    "enabledExplore": true,
-    "exploreUrl": "[{\"title\":\"全部分类\",\"url\":\"\",\"style\":{\"layout_flexGrow\":1,\"layout_flexBasisPercent\":1}},\n{\"title\":\"玄幻奇幻\",\"url\":\"/sort/1/{{page}}.html\",\"style\":{\"layout_flexGrow\":1,\"layout_flexBasisPercent\":0.25}},\n{\"title\":\"都市青春\",\"url\":\"/sort/2/{{page}}.html\",\"style\":{\"layout_flexGrow\":1,\"layout_flexBasisPercent\":0.25}},\n{\"title\":\"武侠仙侠\",\"url\":\"/sort/3/{{page}}.html\",\"style\":{\"layout_flexGrow\":1,\"layout_flexBasisPercent\":0.25}},\n{\"title\":\"历史军事\",\"url\":\"/sort/4/{{page}}.html\",\"style\":{\"layout_flexGrow\":1,\"layout_flexBasisPercent\":0.25}},\n{\"title\":\"女生言情\",\"url\":\"/sort/5/{{page}}.html\",\"style\":{\"layout_flexGrow\":1,\"layout_flexBasisPercent\":0.25}},\n{\"title\":\"长篇连载\",\"url\":\"/sort/7/{{page}}.html\",\"style\":{\"layout_flexGrow\":1,\"layout_flexBasisPercent\":0.25}},\n{\"title\":\"其他综合\",\"url\":\"/sort/8/{{page}}.html\",\"style\":{\"layout_flexGrow\":1,\"layout_flexBasisPercent\":0.25}},{\"title\":\"最近更新\",\"url\":\"/sort/9/{{page}}.html\",\"style\":{\"layout_flexGrow\":1,\"layout_flexBasisPercent\":0.25}},\n                ]",
-    "header": "{'User-Agent':'Mozilla/5.0 (Linux; Android 14; V2304A; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/123.0.6312.118 Mobile Safari/537.36',\n\"Referer\":\"https://733330.xyz/\"}",
-    "lastUpdateTime": 1731209497461,
-    "loginUrl": "https://833330.xyz/login.php",
-    "respondTime": 183247,
-    "ruleBookInfo": {
-      "author": "p.0@text##.*本书编辑|\\s.*",
-      "coverUrl": "img.1@src",
-      "intro": "#introl@textNodes##\\s",
-      "kind": "",
-      "lastChapter": "class.c_row nw@tag.a@text",
-      "name": "h4@text##.*《|》",
-      "tocUrl": "text.显示全部章节@href",
-      "wordCount": "span.2@text"
-    },
-    "ruleContent": {
-      "content": "#acontent@html",
-      "replaceRegex": "##本站发布.*|\\s*备用域名：833330.xyz\\s*|\\s*点击正文中央自动弹出功能按键，用Chrome左右翻页阅读体验更好\\s*|\\s*启用新域名：833330.xyz\\s*|\\s*本小说及人物纯属虚构，如有雷同，纯属巧合，切勿模仿\\s*|"
-    },
-    "ruleExplore": {
-      "bookList": "",
-      "bookUrl": "",
-      "name": ""
-    },
-    "ruleSearch": {
-      "author": "tag.p@text##(\\|.*)$",
-      "bookList": "#jieqi_page_contents@.c_row",
-      "bookUrl": "class.db cf@href",
-      "checkKeyWord": "我的",
-      "coverUrl": "img@src",
-      "intro": ".gray.0@text##.* |\\s",
-      "kind": "",
-      "lastChapter": "",
-      "name": "class.row_text@tag.h4@text",
-      "wordCount": ""
-    },
-    "ruleToc": {
-      "chapterList": "class.db",
-      "chapterName": "class.db.0@text",
-      "chapterUrl": "class.db.0@href",
-      "nextTocUrl": "text.下一页@href"
-    },
-    "searchUrl": "https://833330.xyz/modules/article/search.php?searchkey={{key}}&searchtype=all&page={{page}},{\n  \"charset\": \"utf-8\",\n  \"method\": \"POST\"\n}",
-    "weight": 0
-  },
-  {
     "bookSourceComment": "// 2024.10.18",
     "bookSourceGroup": "18+",
     "bookSourceName": "色友小说🔞",

@@ -1,8 +1,8 @@
 package webbook
 
 import (
-	"gopro/analyzeurl"
 	"gopro/analyzer"
+	"gopro/analyzeurl"
 	"gopro/model"
 
 	"github.com/fastschema/qjs"

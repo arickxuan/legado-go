@@ -105,7 +105,6 @@ func searchFromSource(source model.BookSource, key string, page int, jsPool *qjs
 			books = append(books, book)
 		}
 	}
-	log.Printf("[%s] books=%d", source.BookSourceName, len(books))
 	return books, nil
 }
 

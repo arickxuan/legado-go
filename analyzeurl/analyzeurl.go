@@ -21,10 +21,10 @@ import (
 )
 
 var (
-	pagePattern            = regexp.MustCompile(`\{\{page(?:\|(\d+(?:,\d+)*))?\}\}`)
-	keyPattern             = regexp.MustCompile(`\{\{key\}\}`)
-	jsPattern              = regexp.MustCompile(`\{\{(@js:|<js>)(.*?)(?:</js>)?\}\}`)
-	exprPattern            = regexp.MustCompile(`\{\{(.+?)\}\}`)
+	pagePattern             = regexp.MustCompile(`\{\{page(?:\|(\d+(?:,\d+)*))?\}\}`)
+	keyPattern              = regexp.MustCompile(`\{\{key\}\}`)
+	jsPattern               = regexp.MustCompile(`\{\{(@js:|<js>)(.*?)(?:</js>)?\}\}`)
+	exprPattern             = regexp.MustCompile(`\{\{(.+?)\}\}`)
 	angleBracketPagePattern = regexp.MustCompile(`<(.*?)>`)
 )
 
@@ -38,29 +38,29 @@ type URLOption struct {
 
 // AnalyzeUrl handles URL template expansion and HTTP requests.
 type AnalyzeUrl struct {
-	RuleUrl    string            // original rule URL template
-	FinalUrl   string            // expanded URL
-	Method     string            // GET or POST
-	Body       string            // POST body
-	HeaderMap  map[string]string // request headers
-	Charset    string
-	SourceUrl  string            // base URL of the book source
-	SourceHeader string          // header JSON from book source
-	jsCode        string            // bare @js: code from searchUrl (executed in GetStrResponse)
-	jsPool        *qjs.Pool         // JS pool for inline expression evaluation
-	encodedKey    string            // URL-encoded search keyword (for re-replacement after inline expr)
-	rawKey        string            // raw search keyword (for POST body encoding)
-	page          int               // page number (for re-replacement after inline expr)
-	SourceComment string            // bookSourceComment for eval in inline expressions
+	RuleUrl       string            // original rule URL template
+	FinalUrl      string            // expanded URL
+	Method        string            // GET or POST
+	Body          string            // POST body
+	HeaderMap     map[string]string // request headers
+	Charset       string
+	SourceUrl     string    // base URL of the book source
+	SourceHeader  string    // header JSON from book source
+	jsCode        string    // bare @js: code from searchUrl (executed in GetStrResponse)
+	jsPool        *qjs.Pool // JS pool for inline expression evaluation
+	encodedKey    string    // URL-encoded search keyword (for re-replacement after inline expr)
+	rawKey        string    // raw search keyword (for POST body encoding)
+	page          int       // page number (for re-replacement after inline expr)
+	SourceComment string    // bookSourceComment for eval in inline expressions
 }
 
 // New creates a new AnalyzeUrl with the given parameters.
 func New(ruleUrl string, key string, page int, sourceUrl string, sourceHeader string, jsPools ...*qjs.Pool) *AnalyzeUrl {
 	a := &AnalyzeUrl{
-		RuleUrl:     ruleUrl,
-		Method:      "GET",
-		HeaderMap:   make(map[string]string),
-		SourceUrl:   sourceUrl,
+		RuleUrl:      ruleUrl,
+		Method:       "GET",
+		HeaderMap:    make(map[string]string),
+		SourceUrl:    sourceUrl,
 		SourceHeader: sourceHeader,
 	}
 	if len(jsPools) > 0 {
@@ -71,12 +71,43 @@ func New(ruleUrl string, key string, page int, sourceUrl string, sourceHeader st
 }
 
 // SetComment stores the bookSourceComment for eval() in inline expressions.
-// Must be called before any URL resolution that may use {{expression}} templates.
+// Re-derives the URL from the original template because some searchUrl expressions
+// like {{eval(source.bookSourceComment)}} require the comment to be set first.
 func (a *AnalyzeUrl) SetComment(comment string) {
 	a.SourceComment = comment
-	// Re-resolve if FinalUrl still contains unresolved {{expressions}}
-	if strings.Contains(a.FinalUrl, "{{") {
-		a.resolveInlineExpressions()
+	if a.SourceComment == "" {
+		return
+	}
+	// Re-derive URL from original template with key/page already substituted
+	ruleUrl := a.RuleUrl
+	ruleUrl = keyPattern.ReplaceAllString(ruleUrl, a.encodedKey)
+	if a.page > 0 {
+		ruleUrl = pagePattern.ReplaceAllStringFunc(ruleUrl, func(match string) string {
+			parts := pagePattern.FindStringSubmatch(match)
+			if len(parts) > 1 && parts[1] != "" {
+				pageStrs := strings.Split(parts[1], ",")
+				idx := a.page - 1
+				if idx < len(pageStrs) {
+					return strings.TrimSpace(pageStrs[idx])
+				}
+				return strings.TrimSpace(pageStrs[len(pageStrs)-1])
+			}
+			return strconv.Itoa(a.page)
+		})
+	}
+	// If bare @js: prefix was used, JS runs in GetStrResponse; don't re-derive here
+	if a.jsCode != "" {
+		return
+	}
+	// Re-resolve inline expressions with the comment now available
+	if strings.Contains(ruleUrl, "{{") {
+		a.FinalUrl = ruleUrl
+		if a.jsPool != nil {
+			a.resolveInlineExpressions()
+		}
+	} else {
+		ruleUrl = a.resolveAngleBracketPages(ruleUrl)
+		a.FinalUrl = a.processUrl(ruleUrl)
 	}
 }
 
@@ -121,9 +152,12 @@ func (a *AnalyzeUrl) initUrl(key string, page int) {
 		}
 	}
 
-	// If URL still contains {{expression}}, store raw and defer to resolveInlineExpressions
+	// If URL still contains {{expression}}, resolve now or defer to SetComment
 	if strings.Contains(ruleUrl, "{{") {
 		a.FinalUrl = ruleUrl
+		if a.jsPool != nil {
+			a.resolveInlineExpressions()
+		}
 	} else {
 		ruleUrl = a.resolveAngleBracketPages(ruleUrl)
 		a.FinalUrl = a.processUrl(ruleUrl)
@@ -238,11 +272,12 @@ func quoteJS(s string) string {
 // resolveAngleBracketPages handles Legado's <val1,val2,...> page syntax.
 // page=1 uses val1, page=2 uses val2, etc. Empty values are omitted.
 // Example: /book/${key}<,/${page}> with page=1 -> /book/斗破
-//          /book/${key}<,/${page}> with page=2 -> /book/斗破,/2
-func (a *AnalyzeUrl) resolveAngleBracketPages(url string) string {
-	matches := angleBracketPagePattern.FindStringSubmatch(url)
+//
+//	/book/${key}<,/${page}> with page=2 -> /book/斗破,/2
+func (a *AnalyzeUrl) resolveAngleBracketPages(urlStr string) string {
+	matches := angleBracketPagePattern.FindStringSubmatch(urlStr)
 	if len(matches) < 2 {
-		return url
+		return urlStr
 	}
 	fullMatch := matches[0]
 	pagesStr := matches[1]
@@ -257,7 +292,13 @@ func (a *AnalyzeUrl) resolveAngleBracketPages(url string) string {
 	} else if len(pages) > 0 {
 		replacement = strings.TrimSpace(pages[len(pages)-1])
 	}
-	return strings.Replace(url, fullMatch, replacement, 1)
+	result := strings.Replace(urlStr, fullMatch, replacement, 1)
+	// Replace ${page} and ${key} patterns that may appear in angle bracket values
+	if a.page > 0 {
+		result = strings.ReplaceAll(result, "${page}", strconv.Itoa(a.page))
+	}
+	result = strings.ReplaceAll(result, "${key}", a.encodedKey)
+	return result
 }
 
 // processUrl parses URL options and resolves relative URL.
@@ -269,6 +310,11 @@ func (a *AnalyzeUrl) processUrl(rawUrl string) string {
 		rawUrl = pagePattern.ReplaceAllString(rawUrl, strconv.Itoa(a.page))
 	}
 	rawUrl = keyPattern.ReplaceAllString(rawUrl, a.encodedKey)
+	// Also handle ${page} and ${key} Kotlin-style template patterns
+	if a.page > 0 {
+		rawUrl = strings.ReplaceAll(rawUrl, "${page}", strconv.Itoa(a.page))
+	}
+	rawUrl = strings.ReplaceAll(rawUrl, "${key}", a.encodedKey)
 	urlOption := ""
 	commaIdx := findOptionSeparator(rawUrl)
 	if commaIdx != -1 {
@@ -282,6 +328,31 @@ func (a *AnalyzeUrl) processUrl(rawUrl string) string {
 	return result
 }
 
+// findTemplateExpr finds the first {{...}} expression in the URL using brace-depth counting.
+// This correctly handles expressions containing }} (e.g. JS with URLs containing "://...").
+func findTemplateExpr(s string) (start int, end int, expr string) {
+	start = strings.Index(s, "{{")
+	if start < 0 {
+		return -1, -1, ""
+	}
+	depth := 0
+	for i := start; i < len(s)-1; i++ {
+		if s[i] == '{' && s[i+1] == '{' {
+			depth++
+			i++ // skip second '{'
+			continue
+		}
+		if s[i] == '}' && s[i+1] == '}' {
+			depth--
+			if depth == 0 {
+				return start, i + 2, s[start+2 : i]
+			}
+			i++ // skip second '}'
+		}
+	}
+	return -1, -1, ""
+}
+
 // resolveInlineExpressions evaluates {{expression}} JS templates in the URL.
 // If the result contains more {{key}}/{{page}}, those are replaced too.
 func (a *AnalyzeUrl) resolveInlineExpressions() {
@@ -289,11 +360,11 @@ func (a *AnalyzeUrl) resolveInlineExpressions() {
 		return
 	}
 	for i := 0; i < 5; i++ { // max 5 iterations to avoid infinite loops
-		matches := exprPattern.FindStringSubmatch(a.FinalUrl)
-		if len(matches) < 2 {
+		matchStart, matchEnd, expr := findTemplateExpr(a.FinalUrl)
+		if expr == "" {
 			break
 		}
-		expr := matches[1]
+		_ = matchEnd
 		// Skip simple variable names that weren't replaced (e.g. unknown {{foo}})
 		if !strings.Contains(expr, "(") && !strings.Contains(expr, ".") && !strings.Contains(expr, "+") {
 			break
@@ -312,10 +383,10 @@ func (a *AnalyzeUrl) resolveInlineExpressions() {
 		ctx.Global().SetPropertyStr("page", ctx.NewString(strconv.Itoa(a.page)))
 		// Set source properties for eval(source.bookSourceComment) etc.
 		_, _ = ctx.Eval("set_source.js", qjs.Code(
-			"source.getKey = function(){return " + quoteJS(a.SourceUrl) + "};var api,v;"))
+			"source.getKey = function(){return "+quoteJS(a.SourceUrl)+"};var api,v;"))
 		if a.SourceComment != "" {
 			_, _ = ctx.Eval("set_comment.js", qjs.Code(
-				"source.bookSourceComment = " + quoteJS(a.SourceComment) + ";"))
+				"source.bookSourceComment = "+quoteJS(a.SourceComment)+";"))
 		}
 		res, evalErr := ctx.Eval("inline_expr.js", qjs.Code(expr))
 		resultStr := ""
@@ -338,14 +409,16 @@ func (a *AnalyzeUrl) resolveInlineExpressions() {
 			}
 		}
 		a.jsPool.Put(rt)
-		if resultStr == "" {
-			break
-		}
-		a.FinalUrl = strings.Replace(a.FinalUrl, matches[0], resultStr, 1)
+		a.FinalUrl = a.FinalUrl[:matchStart] + resultStr + a.FinalUrl[matchEnd:]
 		// Re-replace {{key}} and {{page}} if result contains them
 		a.FinalUrl = keyPattern.ReplaceAllString(a.FinalUrl, a.encodedKey)
 		a.FinalUrl = pagePattern.ReplaceAllString(a.FinalUrl, strconv.Itoa(a.page))
+		if a.page > 0 {
+			a.FinalUrl = strings.ReplaceAll(a.FinalUrl, "${page}", strconv.Itoa(a.page))
+		}
+		a.FinalUrl = strings.ReplaceAll(a.FinalUrl, "${key}", a.encodedKey)
 	}
+	a.FinalUrl = strings.TrimSpace(a.FinalUrl)
 	// If still has unresolved {{}}, don't URL-encode it
 	if strings.Contains(a.FinalUrl, "{{") {
 		return

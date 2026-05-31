@@ -396,7 +396,12 @@ func applyJsoupStep(sel *goquery.Selection, step string) []*goquery.Selection {
 	pieces := strings.Split(step, ".")
 	if len(pieces) < 2 {
 		// Simple tag selector or CSS selector (e.g. "a", "#id", ".class")
-		return []*goquery.Selection{sel.Find(step)}
+		found := sel.Find(step)
+		var results []*goquery.Selection
+		found.Each(func(i int, s *goquery.Selection) {
+			results = append(results, s)
+		})
+		return results
 	}
 
 	selectorType := pieces[0]
