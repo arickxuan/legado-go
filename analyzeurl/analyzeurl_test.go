@@ -169,3 +169,38 @@ func TestGbkCharset_RawKeyInBody(t *testing.T) {
 		t.Errorf("Expected 's=斗破', got %q", a.Body)
 	}
 }
+
+func TestInlineExpr_PageArithmetic(t *testing.T) {
+	pool := qjs.NewPool(1, qjs.Option{}, func(r *qjs.Runtime) error { return nil })
+	a := New(`/booklist/{{page-1}}.html`, "test", 3, "https://example.com", "", pool)
+	if a.FinalUrl != "https://example.com/booklist/2.html" {
+		t.Errorf("Expected arithmetic page expression, got %q", a.FinalUrl)
+	}
+}
+
+func TestParseUrlOptionExtendedFields(t *testing.T) {
+	pool := qjs.NewPool(1, qjs.Option{}, func(r *qjs.Runtime) error { return nil })
+	a := New(`/file,{"type":"bin","retry":"2","webView":"true","webJs":"return document.body.innerText","serverID":"7","webViewDelayTime":"300","proxy":"http://127.0.0.1:8888","js":"url=url+'?x=1';java.headerMap.put('X-Test','ok')"}`, "test", 1, "https://example.com", "", pool)
+	if a.Type != "bin" || a.Retry != 2 || !a.UseWebView || a.WebJs == "" || a.ServerID != "7" || a.WebViewDelay != 300 {
+		t.Fatalf("Extended options not parsed: %+v", a)
+	}
+	if a.Proxy != "http://127.0.0.1:8888" {
+		t.Errorf("Expected proxy parsed, got %q", a.Proxy)
+	}
+	if a.HeaderMap["X-Test"] != "ok" {
+		t.Errorf("Expected option js to set header, got %q", a.HeaderMap["X-Test"])
+	}
+	if !strings.Contains(a.FinalUrl, "?x=1") {
+		t.Errorf("Expected option js to mutate url, got %q", a.FinalUrl)
+	}
+}
+
+func TestSourceHeaderFragment(t *testing.T) {
+	a := New(`/`, "test", 1, "https://example.com", `"User-Agent":"UA","Referer":"{{baseUrl}}"`)
+	if a.HeaderMap["User-Agent"] != "UA" {
+		t.Errorf("Expected UA from header fragment, got %q", a.HeaderMap["User-Agent"])
+	}
+	if a.HeaderMap["Referer"] != "https://example.com" {
+		t.Errorf("Expected baseUrl replacement in header, got %q", a.HeaderMap["Referer"])
+	}
+}

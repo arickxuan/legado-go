@@ -4,6 +4,7 @@ import (
 	"gopro/analyzer"
 	"gopro/analyzeurl"
 	"gopro/model"
+	"regexp"
 	"strings"
 
 	"github.com/fastschema/qjs"
@@ -68,6 +69,9 @@ func parseContentPage(source model.BookSource, book *model.Book, chapter *model.
 	// Clean up content
 	if content != "" {
 		content = strings.TrimSpace(content)
+		if contentRule.ReplaceRegex != "" {
+			content = applyReplaceRegex(content, contentRule.ReplaceRegex)
+		}
 		// Remove common ad patterns
 		content = cleanContent(content)
 	}
@@ -82,6 +86,27 @@ func parseContentPage(source model.BookSource, book *model.Book, chapter *model.
 	}
 
 	return content, nextUrl, nil
+}
+
+func applyReplaceRegex(content string, rule string) string {
+	parts := strings.SplitN(rule, "##", 3)
+	pattern := rule
+	replacement := ""
+	if len(parts) >= 2 {
+		pattern = parts[0]
+		replacement = parts[1]
+	}
+	if len(parts) == 3 {
+		replacement = parts[2]
+	}
+	if strings.TrimSpace(pattern) == "" {
+		return content
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return content
+	}
+	return re.ReplaceAllString(content, replacement)
 }
 
 // cleanContent removes common ad patterns and cleans up the content.

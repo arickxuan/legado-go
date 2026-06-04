@@ -19,8 +19,9 @@ const (
 	ModeRegex
 )
 
-// JS_PATTERN matches <js>...</js> or @js:...
-var JS_PATTERN = regexp.MustCompile(`@js:(.+)|<js>([\s\S]*?)</js>`)
+// JS_PATTERN matches <js>...</js> or @js:... . In Legado @js: is usually the
+// final segment of a rule, so it may span multiple lines.
+var JS_PATTERN = regexp.MustCompile(`@js:([\s\S]+)|<js>([\s\S]*?)</js>`)
 
 // templateExprPattern matches {{expression}} inline templates.
 // Uses non-greedy match to handle nested braces correctly.
@@ -91,6 +92,10 @@ func (a *AnalyzeRule) getElementListFromRules(rules []SourceRule, content string
 		if r.IsJs() {
 			current = a.evalJS(r.Rule, current)
 			continue
+		}
+		if strings.Contains(r.Rule, "%%") {
+			results = a.handlePercentInterleaveList(r.Rule, current)
+			return results
 		}
 		switch r.Mode {
 		case ModeJs:
@@ -177,6 +182,10 @@ func (a *AnalyzeRule) getStringFromRules(rules []SourceRule, content string) str
 			result = resolved
 			continue
 		}
+		if strings.Contains(rule, "%%") {
+			result = a.handlePercentInterleaveString(rule, result)
+			continue
+		}
 		// Handle && concatenation (e.g. $.tags&&$.category&&$.status)
 		if strings.Contains(rule, "&&") {
 			result = a.handleAndConcat(rule, result)
@@ -207,6 +216,40 @@ func (a *AnalyzeRule) getStringFromRules(rules []SourceRule, content string) str
 		}
 	}
 	return result
+}
+
+func (a *AnalyzeRule) handlePercentInterleaveString(rule string, content string) string {
+	list := a.handlePercentInterleaveList(rule, content)
+	return strings.Join(list, " ")
+}
+
+func (a *AnalyzeRule) handlePercentInterleaveList(rule string, content string) []string {
+	parts := strings.Split(rule, "%%")
+	lists := make([][]string, 0, len(parts))
+	maxLen := 0
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		vals := a.evalSingleRuleList(part, content)
+		if len(vals) == 0 {
+			continue
+		}
+		lists = append(lists, vals)
+		if len(vals) > maxLen {
+			maxLen = len(vals)
+		}
+	}
+	var out []string
+	for i := 0; i < maxLen; i++ {
+		for _, vals := range lists {
+			if i < len(vals) && strings.TrimSpace(vals[i]) != "" {
+				out = append(out, vals[i])
+			}
+		}
+	}
+	return out
 }
 
 // splitHashReplacement splits a rule into the main rule and ##regex##replacement parts.
@@ -273,6 +316,24 @@ func (a *AnalyzeRule) evalSingleRule(rule string, content string) string {
 	default:
 		return cssGetString(rule, content, a.baseUrl)
 	}
+}
+
+func (a *AnalyzeRule) evalSingleRuleList(rule string, content string) []string {
+	switch DetectMode(rule, a.isJSON) {
+	case ModeJs:
+		if s := a.evalJS(rule, content); s != "" {
+			return []string{s}
+		}
+	case ModeRegex:
+		return applyRegexList(rule, content)
+	case ModeJson:
+		return jsonPathGetStringList(rule, content)
+	case ModeXPath:
+		return xpathGetStringList(rule, content)
+	default:
+		return cssGetStringList(rule, content, a.baseUrl)
+	}
+	return nil
 }
 
 // resolveInlineTemplates resolves {{expression}} templates in a rule string.
@@ -496,6 +557,8 @@ func (a *AnalyzeRule) evalJS(jsCode string, result string) string {
 	InjectLegadoStubs(ctx)
 	ctx.Global().SetPropertyStr("result", ctx.NewString(result))
 	ctx.Global().SetPropertyStr("baseUrl", ctx.NewString(a.baseUrl))
+	ctx.Global().SetPropertyStr("src", ctx.NewString(a.content))
+	_, _ = ctx.Eval("rule_source.js", qjs.Code("source.getKey = function(){return "+strconvQuote(a.baseUrl)+"};source.key = "+strconvQuote(a.baseUrl)+";"))
 	res, err := ctx.Eval("rule.js", qjs.Code(jsCode))
 	if err != nil {
 		return result
@@ -533,6 +596,14 @@ func isJSON(s string) bool {
 	s = strings.TrimSpace(s)
 	return (strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}")) ||
 		(strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]"))
+}
+
+func strconvQuote(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return `""`
+	}
+	return string(b)
 }
 
 // applyRegex applies a regex rule and returns the replaced result.

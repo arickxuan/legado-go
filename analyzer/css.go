@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
+	"golang.org/x/net/html"
 )
 
 // cssGetElementList parses content with CSS/JSoup rules and returns outer HTML of matches.
@@ -380,6 +381,7 @@ func applyJsoupStep(sel *goquery.Selection, step string) []*goquery.Selection {
 	if strings.HasPrefix(step, "-") && !strings.Contains(step, ".") {
 		step = step[1:]
 	}
+	step, bracketFilter := splitBracketFilter(step)
 
 	// Handle ! (exclude) modifier: e.g. "li!0" means "all li except index 0"
 	excludeMode := false
@@ -397,8 +399,18 @@ func applyJsoupStep(sel *goquery.Selection, step string) []*goquery.Selection {
 	if len(pieces) < 2 {
 		// Simple tag selector or CSS selector (e.g. "a", "#id", ".class")
 		found := sel.Find(step)
+		if bracketFilter.has && !bracketFilter.exclude {
+			idx := normalizeIndex(bracketFilter.index, found.Length())
+			if idx < 0 || idx >= found.Length() {
+				return nil
+			}
+			return []*goquery.Selection{found.Eq(idx)}
+		}
 		var results []*goquery.Selection
 		found.Each(func(i int, s *goquery.Selection) {
+			if bracketFilter.has && bracketFilter.exclude && normalizeIndex(bracketFilter.index, found.Length()) == i {
+				return
+			}
 			results = append(results, s)
 		})
 		return results
@@ -410,10 +422,16 @@ func applyJsoupStep(sel *goquery.Selection, step string) []*goquery.Selection {
 		selectorName = pieces[1]
 	}
 	index := -1
+	hasIndex := false
 	if len(pieces) > 2 {
 		if idx, err := strconv.Atoi(pieces[2]); err == nil {
 			index = idx
+			hasIndex = true
 		}
+	}
+	if bracketFilter.has && !bracketFilter.exclude {
+		index = bracketFilter.index
+		hasIndex = true
 	}
 
 	var found *goquery.Selection
@@ -445,6 +463,7 @@ func applyJsoupStep(sel *goquery.Selection, step string) []*goquery.Selection {
 				found = sel.Find(selectorType)
 				if found != nil && found.Length() > 0 {
 					idx, _ := strconv.Atoi(selectorName)
+					idx = normalizeIndex(idx, found.Length())
 					if idx >= 0 && idx < found.Length() {
 						return []*goquery.Selection{found.Eq(idx)}
 					}
@@ -458,16 +477,12 @@ func applyJsoupStep(sel *goquery.Selection, step string) []*goquery.Selection {
 		return nil
 	}
 
-	if index >= 0 {
-		if index >= found.Length() {
-			return nil
-		}
-		return []*goquery.Selection{found.Eq(index)}
-	}
-	if index < 0 && index != -1 {
-		// Negative index: count from end
-		idx := found.Length() + index
+	if hasIndex {
+		idx := index
 		if idx < 0 {
+			idx = found.Length() + idx
+		}
+		if idx < 0 || idx >= found.Length() {
 			return nil
 		}
 		return []*goquery.Selection{found.Eq(idx)}
@@ -475,12 +490,54 @@ func applyJsoupStep(sel *goquery.Selection, step string) []*goquery.Selection {
 	// Return all (or all-except-excluded)
 	var results []*goquery.Selection
 	found.Each(func(i int, s *goquery.Selection) {
-		if excludeMode && i == excludeIdx {
+		excludedByBang := excludeMode && normalizeIndex(excludeIdx, found.Length()) == i
+		excludedByBracket := bracketFilter.has && bracketFilter.exclude && normalizeIndex(bracketFilter.index, found.Length()) == i
+		if excludedByBang || excludedByBracket {
 			return // skip excluded index
 		}
 		results = append(results, s)
 	})
 	return results
+}
+
+type bracketFilter struct {
+	has     bool
+	exclude bool
+	index   int
+}
+
+func splitBracketFilter(step string) (string, bracketFilter) {
+	if !strings.HasSuffix(step, "]") {
+		return step, bracketFilter{}
+	}
+	start := strings.LastIndex(step, "[")
+	if start < 0 {
+		return step, bracketFilter{}
+	}
+	inside := strings.TrimSpace(step[start+1 : len(step)-1])
+	filter := bracketFilter{has: true}
+	if strings.HasPrefix(inside, "!") {
+		filter.exclude = true
+		inside = strings.TrimSpace(inside[1:])
+	}
+	if strings.Contains(inside, ":") {
+		// Range syntax is broader than this parser currently supports. Keep the
+		// selector intact so goquery has a chance to handle normal CSS brackets.
+		return step, bracketFilter{}
+	}
+	idx, err := strconv.Atoi(inside)
+	if err != nil {
+		return step, bracketFilter{}
+	}
+	filter.index = idx
+	return step[:start], filter
+}
+
+func normalizeIndex(idx int, length int) int {
+	if idx < 0 {
+		return length + idx
+	}
+	return idx
 }
 
 // extractContent extracts the final content from selections.
@@ -502,8 +559,10 @@ func extractContent(selections []*goquery.Selection, lastStep string) []string {
 		// Single-word last step: determine extraction type
 		lower := strings.ToLower(strings.TrimSpace(lastStep))
 		switch lower {
-		case "text", "textnodes", "owntext":
+		case "text":
 			contentType = "text"
+		case "textnodes", "owntext":
+			contentType = lower
 		case "html", "all":
 			contentType = "html"
 		case "href", "src":
@@ -519,6 +578,8 @@ func extractContent(selections []*goquery.Selection, lastStep string) []string {
 		switch contentType {
 		case "text":
 			text = strings.TrimSpace(sel.Text())
+		case "owntext", "textnodes":
+			text = strings.TrimSpace(directText(sel))
 		case "html", "all":
 			html, _ := sel.Html()
 			text = strings.TrimSpace(html)
@@ -539,4 +600,18 @@ func extractContent(selections []*goquery.Selection, lastStep string) []string {
 		}
 	}
 	return results
+}
+
+func directText(sel *goquery.Selection) string {
+	var parts []string
+	for _, n := range sel.Nodes {
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			if c.Type == html.TextNode {
+				if text := strings.TrimSpace(c.Data); text != "" {
+					parts = append(parts, text)
+				}
+			}
+		}
+	}
+	return strings.Join(parts, " ")
 }

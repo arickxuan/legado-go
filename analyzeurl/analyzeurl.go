@@ -2,6 +2,7 @@ package analyzeurl
 
 import (
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,10 +31,18 @@ var (
 
 // URLOption represents the JSON option appended after a URL (comma-separated).
 type URLOption struct {
-	Method  string            `json:"method"`
-	Headers map[string]string `json:"headers"`
-	Body    string            `json:"body"`
-	Charset string            `json:"charset"`
+	Method           string            `json:"method"`
+	Headers          map[string]string `json:"headers"`
+	Body             any               `json:"body"`
+	Charset          string            `json:"charset"`
+	Type             string            `json:"type"`
+	JS               string            `json:"js"`
+	Retry            any               `json:"retry"`
+	WebView          any               `json:"webView"`
+	WebJs            string            `json:"webJs"`
+	ServerID         any               `json:"serverID"`
+	WebViewDelayTime any               `json:"webViewDelayTime"`
+	Proxy            string            `json:"proxy"`
 }
 
 // AnalyzeUrl handles URL template expansion and HTTP requests.
@@ -52,6 +61,13 @@ type AnalyzeUrl struct {
 	rawKey        string    // raw search keyword (for POST body encoding)
 	page          int       // page number (for re-replacement after inline expr)
 	SourceComment string    // bookSourceComment for eval in inline expressions
+	Type          string
+	Retry         int
+	UseWebView    bool
+	WebJs         string
+	ServerID      string
+	WebViewDelay  int
+	Proxy         string
 }
 
 // New creates a new AnalyzeUrl with the given parameters.
@@ -163,15 +179,15 @@ func (a *AnalyzeUrl) initUrl(key string, page int) {
 		a.FinalUrl = a.processUrl(ruleUrl)
 	}
 
-	// Parse source header
-	if a.SourceHeader != "" {
-		var headers map[string]string
-		if err := json.Unmarshal([]byte(a.SourceHeader), &headers); err == nil {
-			for k, v := range headers {
-				if _, exists := a.HeaderMap[k]; !exists {
-					a.HeaderMap[k] = v
-				}
-			}
+	// Parse source header. Many real sources store either a full JSON object or
+	// just the inner object fragment: `"User-Agent":"..."`.
+	for k, v := range parseStringMap(a.SourceHeader, a.SourceUrl) {
+		if strings.EqualFold(k, "proxy") {
+			a.Proxy = v
+			continue
+		}
+		if _, exists := a.HeaderMap[k]; !exists {
+			a.HeaderMap[k] = v
 		}
 	}
 
@@ -199,19 +215,15 @@ func findOptionSeparator(urlStr string) int {
 // parseUrlOption parses the URL option JSON string.
 func (a *AnalyzeUrl) parseUrlOption(optionStr string) {
 	var opt URLOption
-	// Legado uses single-quote JSON (e.g. {'method':'POST'}), convert to double-quote
-	jsonStr := optionStr
-	if strings.Contains(jsonStr, "'") {
-		jsonStr = singleToDoubleQuote(jsonStr)
-	}
+	jsonStr := normalizeJSONLike(optionStr)
 	if err := json.Unmarshal([]byte(jsonStr), &opt); err != nil {
 		return
 	}
 	if opt.Method != "" {
 		a.Method = strings.ToUpper(opt.Method)
 	}
-	if opt.Body != "" {
-		a.Body = opt.Body
+	if opt.Body != nil {
+		a.Body = stringifyOptionValue(opt.Body)
 		// Replace URL-encoded key with raw key in body for proper charset encoding
 		if a.encodedKey != a.rawKey {
 			a.Body = strings.ReplaceAll(a.Body, a.encodedKey, a.rawKey)
@@ -220,8 +232,121 @@ func (a *AnalyzeUrl) parseUrlOption(optionStr string) {
 	if opt.Charset != "" {
 		a.Charset = opt.Charset
 	}
+	if opt.Type != "" {
+		a.Type = opt.Type
+	}
+	if opt.JS != "" {
+		a.evalOptionJS(opt.JS)
+	}
+	if opt.Retry != nil {
+		a.Retry = intFromAny(opt.Retry)
+	}
+	if opt.WebView != nil {
+		a.UseWebView = truthyOption(opt.WebView)
+	}
+	if opt.WebJs != "" {
+		a.WebJs = opt.WebJs
+	}
+	if opt.ServerID != nil {
+		a.ServerID = stringifyOptionValue(opt.ServerID)
+	}
+	if opt.WebViewDelayTime != nil {
+		a.WebViewDelay = intFromAny(opt.WebViewDelayTime)
+	}
+	if opt.Proxy != "" {
+		a.Proxy = opt.Proxy
+	}
 	for k, v := range opt.Headers {
-		a.HeaderMap[k] = v
+		if strings.EqualFold(k, "proxy") {
+			a.Proxy = v
+		} else {
+			a.HeaderMap[k] = v
+		}
+	}
+}
+
+func parseStringMap(raw string, baseUrl string) map[string]string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	raw = strings.ReplaceAll(raw, "{{baseUrl}}", baseUrl)
+	jsonStr := normalizeJSONLike(raw)
+	if !strings.HasPrefix(strings.TrimSpace(jsonStr), "{") {
+		jsonStr = "{" + jsonStr + "}"
+	}
+	var anyMap map[string]any
+	if err := json.Unmarshal([]byte(jsonStr), &anyMap); err != nil {
+		return nil
+	}
+	out := make(map[string]string, len(anyMap))
+	for k, v := range anyMap {
+		out[k] = stringifyOptionValue(v)
+	}
+	return out
+}
+
+func normalizeJSONLike(s string) string {
+	s = strings.TrimSpace(s)
+	if strings.Contains(s, "'") {
+		s = singleToDoubleQuote(s)
+	}
+	return s
+}
+
+func stringifyOptionValue(v any) string {
+	switch value := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return value
+	case float64:
+		if value == float64(int64(value)) {
+			return strconv.FormatInt(int64(value), 10)
+		}
+		return strconv.FormatFloat(value, 'f', -1, 64)
+	case bool:
+		if value {
+			return "true"
+		}
+		return "false"
+	default:
+		b, err := json.Marshal(value)
+		if err != nil {
+			return fmt.Sprint(value)
+		}
+		return string(b)
+	}
+}
+
+func intFromAny(v any) int {
+	switch value := v.(type) {
+	case float64:
+		return int(value)
+	case string:
+		i, _ := strconv.Atoi(strings.TrimSpace(value))
+		return i
+	case int:
+		return value
+	case json.Number:
+		i, _ := value.Int64()
+		return int(i)
+	default:
+		return 0
+	}
+}
+
+func truthyOption(v any) bool {
+	switch value := v.(type) {
+	case nil:
+		return false
+	case bool:
+		return value
+	case string:
+		value = strings.TrimSpace(strings.ToLower(value))
+		return value != "" && value != "false" && value != "0" && value != "null"
+	default:
+		return true
 	}
 }
 
@@ -322,8 +447,10 @@ func (a *AnalyzeUrl) processUrl(rawUrl string) string {
 		rawUrl = rawUrl[:commaIdx]
 	}
 	result := resolveURL(a.SourceUrl, rawUrl)
+	a.FinalUrl = result
 	if urlOption != "" {
 		a.parseUrlOption(urlOption)
+		result = a.FinalUrl
 	}
 	return result
 }
@@ -366,7 +493,7 @@ func (a *AnalyzeUrl) resolveInlineExpressions() {
 		}
 		_ = matchEnd
 		// Skip simple variable names that weren't replaced (e.g. unknown {{foo}})
-		if !strings.Contains(expr, "(") && !strings.Contains(expr, ".") && !strings.Contains(expr, "+") {
+		if !looksLikeJSExpression(expr) {
 			break
 		}
 		rt, err := a.jsPool.Get()
@@ -374,20 +501,7 @@ func (a *AnalyzeUrl) resolveInlineExpressions() {
 			break
 		}
 		ctx := rt.Context()
-		analyzer.InjectLegadoStubs(ctx)
-		ctx.Global().SetPropertyStr("baseUrl", ctx.NewString(a.SourceUrl))
-		ctx.Global().SetPropertyStr("result", ctx.NewString(""))
-		// Provide key/page for template literals like ${key}
-		decodedKey, _ := url.QueryUnescape(a.encodedKey)
-		ctx.Global().SetPropertyStr("key", ctx.NewString(decodedKey))
-		ctx.Global().SetPropertyStr("page", ctx.NewString(strconv.Itoa(a.page)))
-		// Set source properties for eval(source.bookSourceComment) etc.
-		_, _ = ctx.Eval("set_source.js", qjs.Code(
-			"source.getKey = function(){return "+quoteJS(a.SourceUrl)+"};var api,v;"))
-		if a.SourceComment != "" {
-			_, _ = ctx.Eval("set_comment.js", qjs.Code(
-				"source.bookSourceComment = "+quoteJS(a.SourceComment)+";"))
-		}
+		a.injectJSContext(ctx, "")
 		res, evalErr := ctx.Eval("inline_expr.js", qjs.Code(expr))
 		resultStr := ""
 		if evalErr != nil {
@@ -426,6 +540,21 @@ func (a *AnalyzeUrl) resolveInlineExpressions() {
 	a.FinalUrl = a.processUrl(a.FinalUrl)
 }
 
+func looksLikeJSExpression(expr string) bool {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return false
+	}
+	if expr == "key" || expr == "page" {
+		return true
+	}
+	return strings.ContainsAny(expr, "().+-*/?:=;[]{}\"'`") ||
+		strings.Contains(expr, "java") ||
+		strings.Contains(expr, "source") ||
+		strings.Contains(expr, "cookie") ||
+		strings.Contains(expr, "cache")
+}
+
 // resolveJS executes bare @js: code and parses the result as URL + option.
 // Legado searchUrl like: @js:url=baseUrl+"/so/{{key}}.html,{'method':'GET',...}";result=url;
 func (a *AnalyzeUrl) resolveJS(jsPool *qjs.Pool) {
@@ -439,9 +568,7 @@ func (a *AnalyzeUrl) resolveJS(jsPool *qjs.Pool) {
 	defer jsPool.Put(rt)
 
 	ctx := rt.Context()
-	analyzer.InjectLegadoStubs(ctx)
-	ctx.Global().SetPropertyStr("baseUrl", ctx.NewString(a.SourceUrl))
-	ctx.Global().SetPropertyStr("result", ctx.NewString(""))
+	a.injectJSContext(ctx, "")
 
 	res, err := ctx.Eval("searchUrl.js", qjs.Code(a.jsCode))
 	if err != nil {
@@ -477,26 +604,81 @@ func (a *AnalyzeUrl) resolveJS(jsPool *qjs.Pool) {
 	}
 }
 
+func (a *AnalyzeUrl) injectJSContext(ctx *qjs.Context, result string) {
+	analyzer.InjectLegadoStubs(ctx)
+	decodedKey, _ := url.QueryUnescape(a.encodedKey)
+	ctx.Global().SetPropertyStr("baseUrl", ctx.NewString(a.SourceUrl))
+	ctx.Global().SetPropertyStr("key", ctx.NewString(decodedKey))
+	ctx.Global().SetPropertyStr("page", ctx.NewInt32(int32(a.page)))
+	ctx.Global().SetPropertyStr("result", ctx.NewString(result))
+	ctx.Global().SetPropertyStr("src", ctx.NewString(result))
+	_, _ = ctx.Eval("set_source.js", qjs.Code(
+		"source.key = "+quoteJS(a.SourceUrl)+";"+
+			"source.bookSourceUrl = "+quoteJS(a.SourceUrl)+";"+
+			"source.bookSourceComment = "+quoteJS(a.SourceComment)+";"+
+			"source.getKey = function(){return "+quoteJS(a.SourceUrl)+"};"))
+}
+
+func (a *AnalyzeUrl) evalOptionJS(jsCode string) {
+	if a.jsPool == nil || strings.TrimSpace(jsCode) == "" {
+		return
+	}
+	rt, err := a.jsPool.Get()
+	if err != nil {
+		return
+	}
+	defer a.jsPool.Put(rt)
+	ctx := rt.Context()
+	a.injectJSContext(ctx, a.FinalUrl)
+	_, _ = ctx.Eval("set_url.js", qjs.Code(
+		"var url = "+quoteJS(a.FinalUrl)+";"+
+			"java.url = url;"+
+			"java.headerMap = {put:function(k,v){java._headers[String(k)] = String(v)}};"+
+			"java._headers = {};"))
+	res, err := ctx.Eval("url_option.js", qjs.Code(jsCode))
+	if err == nil && res != nil {
+		if !res.IsUndefined() && !res.IsNull() && res.String() != "" {
+			a.FinalUrl = resolveURL(a.SourceUrl, res.String())
+		}
+		res.Free()
+	}
+	if v := ctx.Global().GetPropertyStr("url"); v != nil {
+		if !v.IsUndefined() && !v.IsNull() && v.String() != "" {
+			a.FinalUrl = resolveURL(a.SourceUrl, v.String())
+		}
+		v.Free()
+	}
+	if v := ctx.Global().GetPropertyStr("java"); v != nil {
+		h := v.GetPropertyStr("_headers")
+		if h != nil && h.IsObject() {
+			h.ForEach(func(key *qjs.Value, value *qjs.Value) {
+				a.HeaderMap[key.String()] = value.String()
+			})
+			h.Free()
+		}
+		v.Free()
+	}
+}
+
 // GetStrResponse sends the HTTP request and returns the response body as string.
 func (a *AnalyzeUrl) GetStrResponse(jsPool *qjs.Pool) (string, error) {
 	// Execute bare @js: code from searchUrl (e.g. qidian.com)
 	if a.jsCode != "" {
 		a.resolveJS(jsPool)
 	}
-
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
+	if strings.TrimSpace(a.FinalUrl) == "" {
+		return "", fmt.Errorf("empty final url after analyzing rule %q", a.RuleUrl)
 	}
+
+	client := a.httpClient()
 
 	var req *http.Request
 	var err error
 
 	switch a.Method {
 	case "POST":
-		req, err = http.NewRequest("POST", a.FinalUrl, strings.NewReader(a.Body))
+		requestBody := a.encodedRequestBody()
+		req, err = http.NewRequest("POST", a.FinalUrl, strings.NewReader(requestBody))
 		if err != nil {
 			return "", err
 		}
@@ -521,19 +703,28 @@ func (a *AnalyzeUrl) GetStrResponse(jsPool *qjs.Pool) (string, error) {
 		req.Header.Set(k, v)
 	}
 
-	// Encode POST body in the specified charset (e.g. GBK)
-	if a.Method == "POST" && a.Body != "" && a.Charset != "" {
-		charset := strings.ToLower(a.Charset)
-		if charset == "gbk" || charset == "gb2312" || charset == "gb18030" {
-			encoded, err := io.ReadAll(transform.NewReader(strings.NewReader(a.Body), simplifiedchinese.GBK.NewEncoder()))
-			if err == nil {
-				req.Body = io.NopCloser(strings.NewReader(string(encoded)))
-				req.ContentLength = int64(len(encoded))
+	var resp *http.Response
+	attempts := a.Retry + 1
+	if attempts < 1 {
+		attempts = 1
+	}
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			req = req.Clone(req.Context())
+			if a.Method == "POST" {
+				body := a.encodedRequestBody()
+				req.Body = io.NopCloser(strings.NewReader(body))
+				req.ContentLength = int64(len(body))
 			}
 		}
+		resp, err = client.Do(req)
+		if err == nil && resp.StatusCode < 500 {
+			break
+		}
+		if resp != nil && i < attempts-1 {
+			resp.Body.Close()
+		}
 	}
-
-	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -546,6 +737,9 @@ func (a *AnalyzeUrl) GetStrResponse(jsPool *qjs.Pool) (string, error) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
+	}
+	if a.Type != "" {
+		return hex.EncodeToString(body), nil
 	}
 
 	// Decode response body from the specified charset to UTF-8
@@ -560,6 +754,120 @@ func (a *AnalyzeUrl) GetStrResponse(jsPool *qjs.Pool) (string, error) {
 	}
 
 	return string(body), nil
+}
+
+func (a *AnalyzeUrl) httpClient() *http.Client {
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	if a.Proxy != "" {
+		proxyURL := strings.TrimSpace(a.Proxy)
+		if idx := strings.LastIndex(proxyURL, "@"); idx > strings.Index(proxyURL, "://")+2 {
+			// Legado also allows proxy://host@user@pass. net/http only accepts
+			// standard userinfo syntax; ignore credentials for now rather than failing.
+			proxyURL = proxyURL[:idx]
+		}
+		if u, err := url.Parse(proxyURL); err == nil {
+			transport.Proxy = http.ProxyURL(u)
+		}
+	}
+	return &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return http.ErrUseLastResponse
+			}
+			return nil
+		},
+	}
+}
+
+func (a *AnalyzeUrl) encodedRequestBody() string {
+	if a.Body == "" {
+		return ""
+	}
+	contentType := strings.ToLower(a.HeaderMap["Content-Type"])
+	if isJSON(a.Body) || isXML(a.Body) || (contentType != "" && !strings.Contains(contentType, "x-www-form-urlencoded")) {
+		return encodeWholeBody(a.Body, a.Charset)
+	}
+	return encodeFormBody(a.Body, a.Charset)
+}
+
+func encodeWholeBody(body string, charset string) string {
+	if isGBK(charset) {
+		if encoded, err := io.ReadAll(transform.NewReader(strings.NewReader(body), simplifiedchinese.GBK.NewEncoder())); err == nil {
+			return string(encoded)
+		}
+	}
+	return body
+}
+
+func encodeFormBody(body string, charset string) string {
+	var out strings.Builder
+	parts := strings.Split(body, "&")
+	for i, part := range parts {
+		if i > 0 {
+			out.WriteByte('&')
+		}
+		key, val, ok := strings.Cut(part, "=")
+		out.WriteString(encodeFormComponent(key, charset))
+		if ok {
+			out.WriteByte('=')
+			out.WriteString(encodeFormComponent(val, charset))
+		}
+	}
+	return out.String()
+}
+
+func encodeFormComponent(s string, charset string) string {
+	if s == "" || alreadyEncoded(s) {
+		return s
+	}
+	if isGBK(charset) {
+		encoded, err := io.ReadAll(transform.NewReader(strings.NewReader(s), simplifiedchinese.GBK.NewEncoder()))
+		if err == nil {
+			return percentEncodeBytes(encoded)
+		}
+	}
+	return url.QueryEscape(s)
+}
+
+func percentEncodeBytes(b []byte) string {
+	const hexChars = "0123456789ABCDEF"
+	var out strings.Builder
+	for _, c := range b {
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9',
+			c == '-', c == '_', c == '.', c == '*':
+			out.WriteByte(c)
+		case c == ' ':
+			out.WriteByte('+')
+		default:
+			out.WriteByte('%')
+			out.WriteByte(hexChars[c>>4])
+			out.WriteByte(hexChars[c&0x0f])
+		}
+	}
+	return out.String()
+}
+
+func alreadyEncoded(s string) bool {
+	for i := 0; i < len(s)-2; i++ {
+		if s[i] == '%' && isHex(s[i+1]) && isHex(s[i+2]) {
+			return true
+		}
+	}
+	return false
+}
+
+func isHex(b byte) bool {
+	return b >= '0' && b <= '9' || b >= 'a' && b <= 'f' || b >= 'A' && b <= 'F'
+}
+
+func isGBK(charset string) bool {
+	charset = strings.ToLower(strings.TrimSpace(charset))
+	return charset == "gbk" || charset == "gb2312" || charset == "gb18030"
 }
 
 // ExecuteJS executes JavaScript on the response body and returns the result.

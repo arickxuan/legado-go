@@ -1,6 +1,8 @@
 package analyzer
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/fastschema/qjs"
@@ -288,4 +290,54 @@ func TestStub_JavaGetElements(t *testing.T) {
 		t.Errorf("Expected 2 elements, got %d", v.Int32())
 	}
 	v.Free()
+}
+
+func TestStub_JavaGetResponseHeader(t *testing.T) {
+	redirectTo := "/result?searchid=123"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", redirectTo)
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer ts.Close()
+
+	pool := qjs.NewPool(1, qjs.Option{}, func(r *qjs.Runtime) error { return nil })
+	rt, err := pool.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Put(rt)
+	ctx := rt.Context()
+	InjectLegadoStubs(ctx)
+	v, err := ctx.Eval("test.js", qjs.Code(`java.get("`+ts.URL+`/search", {}).header("location")`))
+	if err != nil {
+		t.Fatalf("java.get header error: %v", err)
+	}
+	if v.String() != redirectTo {
+		t.Errorf("Expected redirect location %q, got %q", redirectTo, v.String())
+	}
+	v.Free()
+}
+
+func TestPercentInterleave(t *testing.T) {
+	html := `<div><span class="a">A1</span><span class="a">A2</span><span class="b">B1</span><span class="b">B2</span></div>`
+	pool := qjs.NewPool(1, qjs.Option{}, func(r *qjs.Runtime) error { return nil })
+	ar := NewAnalyzeRule(html, "https://test.com", pool)
+	got := ar.GetString(".a@text%%.b@text")
+	if got != "A1 B1 A2 B2" {
+		t.Errorf("Expected interleaved text, got %q", got)
+	}
+}
+
+func TestOwnTextAndBracketIndex(t *testing.T) {
+	html := `<div class="info">作者：<span>天蚕土豆</span> 玄幻</div><a href="/1">一</a><a href="/2">二</a>`
+	pool := qjs.NewPool(1, qjs.Option{}, func(r *qjs.Runtime) error { return nil })
+	ar := NewAnalyzeRule(html, "https://test.com", pool)
+	own := ar.GetString(".info@ownText")
+	if own != "作者： 玄幻" {
+		t.Errorf("Expected direct text only, got %q", own)
+	}
+	href := ar.GetString("a[-1]@href")
+	if href != "/2" {
+		t.Errorf("Expected bracket negative index href /2, got %q", href)
+	}
 }

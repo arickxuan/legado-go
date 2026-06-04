@@ -15,6 +15,7 @@ type SearchReq struct {
 	Keyword     string   `json:"keyword" binding:"required"`
 	Page        int      `json:"page"`
 	SourceUrls  []string `json:"sourceUrls"` // empty = search all
+	Diagnostics bool     `json:"diagnostics"`
 }
 
 type BookInfoReq struct {
@@ -28,8 +29,8 @@ type ChaptersReq struct {
 }
 
 type ContentReq struct {
-	SourceUrl string           `json:"sourceUrl" binding:"required"`
-	Book      model.Book       `json:"book" binding:"required"`
+	SourceUrl string            `json:"sourceUrl" binding:"required"`
+	Book      model.Book        `json:"book" binding:"required"`
 	Chapter   model.BookChapter `json:"chapter" binding:"required"`
 }
 
@@ -51,6 +52,11 @@ func (s *Server) handleSearch(c *gin.Context) {
 		return
 	}
 
+	if req.Diagnostics {
+		report := webbook.SearchBooksDetailed(sources, req.Keyword, req.Page, 10, s.jsPool)
+		c.JSON(http.StatusOK, report)
+		return
+	}
 	results := webbook.SearchBooks(sources, req.Keyword, req.Page, 10, s.jsPool)
 	c.JSON(http.StatusOK, results)
 }

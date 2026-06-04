@@ -1,6 +1,7 @@
 package webbook
 
 import (
+	"fmt"
 	"log"
 	"sync"
 
@@ -11,9 +12,26 @@ import (
 	"github.com/fastschema/qjs"
 )
 
+type SourceError struct {
+	SourceName string `json:"sourceName"`
+	SourceUrl  string `json:"sourceUrl"`
+	Stage      string `json:"stage"`
+	Error      string `json:"error"`
+}
+
+type SearchReport struct {
+	Results []model.SearchBook `json:"results"`
+	Errors  []SourceError      `json:"errors,omitempty"`
+}
+
 // SearchBooks searches books across multiple sources concurrently.
 // Returns aggregated search results from all enabled sources.
 func SearchBooks(sources []model.BookSource, key string, page int, maxConcurrency int, jsPool *qjs.Pool) []model.SearchBook {
+	return SearchBooksDetailed(sources, key, page, maxConcurrency, jsPool).Results
+}
+
+// SearchBooksDetailed is like SearchBooks but preserves per-source diagnostics.
+func SearchBooksDetailed(sources []model.BookSource, key string, page int, maxConcurrency int, jsPool *qjs.Pool) SearchReport {
 	if maxConcurrency <= 0 {
 		maxConcurrency = 10
 	}
@@ -21,6 +39,7 @@ func SearchBooks(sources []model.BookSource, key string, page int, maxConcurrenc
 	var (
 		mu      sync.Mutex
 		results []model.SearchBook
+		errors  []SourceError
 		wg      sync.WaitGroup
 		sem     = make(chan struct{}, maxConcurrency)
 	)
@@ -36,6 +55,14 @@ func SearchBooks(sources []model.BookSource, key string, page int, maxConcurrenc
 			defer func() { <-sem }()
 			books, err := searchFromSource(src, key, page, jsPool)
 			if err != nil {
+				mu.Lock()
+				errors = append(errors, SourceError{
+					SourceName: src.BookSourceName,
+					SourceUrl:  src.BookSourceUrl,
+					Stage:      "search",
+					Error:      err.Error(),
+				})
+				mu.Unlock()
 				return
 			}
 			mu.Lock()
@@ -44,7 +71,7 @@ func SearchBooks(sources []model.BookSource, key string, page int, maxConcurrenc
 		}(source)
 	}
 	wg.Wait()
-	return results
+	return SearchReport{Results: results, Errors: errors}
 }
 
 // searchFromSource searches books from a single source.
@@ -73,7 +100,7 @@ func searchFromSource(source model.BookSource, key string, page int, jsPool *qjs
 	//log.Printf("[%s] bookItems=%d", source.BookSourceName, len(bookItems))
 	if len(bookItems) == 0 {
 		log.Printf("[%s] no results matched (body len=%d, bookItems=%d)", source.BookSourceName, len(body), len(bookItems))
-		return nil, nil
+		return nil, fmt.Errorf("no results matched rule %q (body len=%d)", bookListRule, len(body))
 	}
 
 	var books []model.SearchBook
